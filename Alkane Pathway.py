@@ -1,231 +1,235 @@
-import cobra
+from optlang import glpk_interface
 
-# --- 0. Set the solver explicitly ---
-try:
-    cobra.Configuration().solver = "glpk"
-    print(f"Using solver: {cobra.Configuration().solver}")
-except Exception as e:
-    print(f"Could not set GLPK solver: {e}")
-    print("Please ensure GLPK is installed and configured for cobrapy.")
+# --- 1. Create a solver object ---
+solver = glpk_interface.Model()
+print(f"Using solver: {glpk_interface.Model.__module__}")
 
-# --- 1. Create a new COBRA model for R_NpADO only ---
-model = cobra.Model("Minimal_NpADO_Test_Final_Corrected_V8_Full_Rigorous_Check")
+# --- 2. Define Flux Variables for each reaction and add them to the solver ---
 
-# --- 2. Define Metabolites for R_NpADO with Formulas and Charges ---
-fa_ald_c16_c = cobra.Metabolite(
-    "fa_ald_c16_c",
-    name="Hexadecanal (C16 Aldehyde)",
-    compartment="c",
-    formula="C16H32O",  # Hexadecanal
-    charge=0
-)
-alkane_c15_c = cobra.Metabolite(
-    "alkane_c15_c",
-    name="Pentadecane (C15 Alkane)",
-    compartment="c",
-    formula="C15H32",   # Pentadecane
-    charge=0
-)
+# Core Pathway Reactions
+v_npado = glpk_interface.Variable("R_NpADO", lb=0.0, ub=1000.0)
+solver.add(v_npado)
 
-o2_c = cobra.Metabolite(
-    "o2_c",
-    name="Oxygen",
-    compartment="c",
-    formula="O2",
-    charge=0
-)
-# Using standard charges for NAD(P)H and NAD(P)+ at physiological pH
-# NADPH: C21H29N7O17P3, charge -4 (from phosphates)
-# NADP+: C21H28N7O17P3, charge -3 (one less H+ than NADPH)
-nadph_c = cobra.Metabolite(
-    "nadph_c",
-    name="NADPH",
-    compartment="c",
-    formula="C21H29N7O17P3",
-    charge=-4
-)
-nadp_c = cobra.Metabolite(
-    "nadp_c",
-    name="NADP+",
-    compartment="c",
-    formula="C21H28N7O17P3",
-    charge=-3
-)
-h2o_c = cobra.Metabolite(
-    "h2o_c",
-    name="Water",
-    compartment="c",
-    formula="H2O",
-    charge=0
-)
-formate_c = cobra.Metabolite(
-    "formate_c",
-    name="Formate",
-    compartment="c",
-    formula="CHO2", # HCOO-
-    charge=-1
-)
-h_c = cobra.Metabolite(
-    "h_c",
-    name="Proton",
-    compartment="c",
-    formula="H",
-    charge=1
-)
+v_nadph_regen = glpk_interface.Variable("R_NADPH_regeneration", lb=0.0, ub=1000.0)
+solver.add(v_nadph_regen)
 
-alkane_c15_e = cobra.Metabolite(
-    "alkane_c15_e",
-    name="Pentadecane (C15 Alkane) External",
-    compartment="e",
-    formula="C15H32", # Same as internal alkane
-    charge=0
-)
+# ATP Maintenance reaction (requires a minimum flux for cellular activity)
+v_atp_maintenance = glpk_interface.Variable("R_ATP_Maintenance", lb=1.0, ub=1000.0) # Enforce a minimum ATP demand
+solver.add(v_atp_maintenance)
+
+# Simplified ATP Generation reaction
+v_atp_generation = glpk_interface.Variable("R_ATP_Generation", lb=0.0, ub=1000.0)
+solver.add(v_atp_generation)
 
 
-# --- 3. Add Metabolites to the model ---
-model.add_metabolites([
-    fa_ald_c16_c, alkane_c15_c,
-    o2_c, nadph_c, nadp_c, h2o_c, formate_c, h_c,
-    alkane_c15_e
-])
+# Exchange Reactions (inputs and outputs to/from the system)
+wide_bound = 999999.0
 
-# --- 4. Define R_NpADO Reaction ---
-rxn_npado = cobra.Reaction("R_NpADO")
-rxn_npado.name = "Nostoc punctiforme Aldehyde Deformylating Oxygenase"
-rxn_npado.lower_bound = 0.0 # Will temporarily change this for test
-rxn_npado.upper_bound = 1000.0
+# Precursor uptake: Specific fixed input for fa_ald_c16_c
+v_ex_fa_ald = glpk_interface.Variable("EX_fa_ald_c16_c", lb=-10.0, ub=0.0) # Allows uptake up to 10 units.
+solver.add(v_ex_fa_ald)
 
-# Confirmed correct stoichiometry for 4-electron transfer and charge balance
-rxn_npado.add_metabolites({
-    fa_ald_c16_c: -1.0,
-    o2_c: -1.0,
-    nadph_c: -2.0,  # For 4-electron transfer
-    h_c: -1.0,      # Correct for charge balance with 2 NADPH/2 NADP+
-    alkane_c15_c: 1.0,
-    formate_c: 1.0,
-    h2o_c: 1.0,
-    nadp_c: 2.0     # For 4-electron transfer
-})
-model.add_reactions([rxn_npado]) # Ensure model.add_reactions (plural) is used
+# Unlimited inputs (negative lower bound for uptake, positive upper bound for potential export)
+v_ex_o2 = glpk_interface.Variable("EX_o2_c", lb=-wide_bound, ub=wide_bound)
+solver.add(v_ex_o2)
 
-# --- Manual Mass and Charge Balance Check for R_NpADO ---
-print("\n--- Manual Balance Check for R_NpADO (using check_mass_balance and manual charge check) ---")
-mass_balance = rxn_npado.check_mass_balance()
+# Bounds for NADPH and NADP exchange remain 0.0 to force internal regeneration
+v_ex_nadph = glpk_interface.Variable("EX_nadph_c", lb=0.0, ub=0.0)
+solver.add(v_ex_nadph)
 
-if mass_balance:
-    print(f"Mass balance for {rxn_npado.id}: OK. Imbalance: {mass_balance}") # Display imbalance for verification
-else:
-    print(f"Mass balance for {rxn_npado.id}: FAILED. Imbalance: {mass_balance}")
+v_ex_nadp = glpk_interface.Variable("EX_nadp_c", lb=0.0, ub=0.0)
+solver.add(v_ex_nadp)
 
-# Manually verify charge balance (as check_charge_balance does not exist)
-# Sum of (stoichiometric_coefficient * charge) for all metabolites in reaction
-net_charge = sum(coeff * met.charge for met, coeff in rxn_npado.metabolites.items())
-if net_charge == 0:
-    print(f"Charge balance for {rxn_npado.id}: OK (Net charge: {net_charge})")
-else:
-    print(f"Charge balance for {rxn_npado.id}: FAILED. Net charge: {net_charge}")
+v_ex_h2o = glpk_interface.Variable("EX_h2o_c", lb=-wide_bound, ub=wide_bound)
+solver.add(v_ex_h2o)
+
+# **CRITICAL FIX HERE**: Removed the extra '.interface'
+v_ex_formate = glpk_interface.Variable("EX_formate_c", lb=-wide_bound, ub=wide_bound)
+solver.add(v_ex_formate)
+
+# Unlimited input for H+
+v_ex_h = glpk_interface.Variable("EX_h_c", lb=-wide_bound, ub=wide_bound)
+solver.add(v_ex_h)
+
+# Unlimited input for electrons
+v_ex_e = glpk_interface.Variable("EX_e_c", lb=-wide_bound, ub=wide_bound)
+solver.add(v_ex_e)
+
+# Product export
+v_ex_alkane_transport = glpk_interface.Variable("EX_alkane_c15_e_transport", lb=0.0, ub=wide_bound)
+solver.add(v_ex_alkane_transport)
 
 
-# --- 5. Add ONLY necessary Exchange Reactions for R_NpADO inputs/outputs ---
-# Inputs (sources)
-ex_fa_ald = cobra.Reaction("EX_fa_ald_c16_c")
-ex_fa_ald.add_metabolites({fa_ald_c16_c: -1.0})
-ex_fa_ald.lower_bound = -10.0
-model.add_reactions([ex_fa_ald])
+# --- 3. Define Metabolite Mass Balance Constraints ---
 
-ex_o2 = cobra.Reaction("EX_o2_c")
-ex_o2.add_metabolites({o2_c: -1.0})
-ex_o2.lower_bound = -1000.0
-model.add_reactions([ex_o2])
+# Stoichiometric coefficients for existing reactions
+# R_NpADO: fa_ald_c16_c + O2 + 2 NADPH + H+ + 4 e- -> alkane_c15_c + formate + H2O + 2 NADP+
+npado_coeffs = {
+    "fa_ald_c16_c": -1.0, "o2_c": -1.0, "nadph_c": -2.0, "h_c": -1.0, "e_c": -4.0,
+    "alkane_c15_c": 1.0, "formate_c": 1.0, "h2o_c": 1.0, "nadp_c": 2.0
+}
 
-ex_nadph = cobra.Reaction("EX_nadph_c")
-ex_nadph.add_metabolites({nadph_c: -1.0})
-ex_nadph.lower_bound = -1000.0
-model.add_reactions([ex_nadph])
+# R_NADPH_regeneration: 2 NADP+ + 2 H+ -> 2 NADPH
+nadph_regen_coeffs = {
+    "nadp_c": -2.0, "h_c": -2.0, "nadph_c": 2.0
+}
 
-# Outputs (sinks)
-ex_formate = cobra.Reaction("EX_formate_c")
-ex_formate.add_metabolites({formate_c: -1.0})
-ex_formate.lower_bound = 0.0
-model.add_reactions([ex_formate])
+# New: Stoichiometric coefficients for new reactions
+# R_ATP_Maintenance: ATP_c + H2O_c -> ADP_c + PI_c + H_c
+atp_maint_coeffs = {
+    "atp_c": -1.0, "h2o_c": -1.0, "adp_c": 1.0, "pi_c": 1.0, "h_c": 1.0
+}
 
-ex_h2o = cobra.Reaction("EX_h2o_c")
-ex_h2o.add_metabolites({h2o_c: -1.0})
-ex_h2o.lower_bound = -1000.0 # Bidirectional
-model.add_reactions([ex_h2o])
-
-ex_nadp = cobra.Reaction("EX_nadp_c")
-ex_nadp.add_metabolites({nadp_c: -1.0})
-ex_nadp.lower_bound = -1000.0 # IMPORTANT: Changed to bidirectional
-ex_nadp.upper_bound = 1000.0
-model.add_reactions([ex_nadp])
-
-ex_h = cobra.Reaction("EX_h_c")
-ex_h.add_metabolites({h_c: -1.0})
-ex_h.lower_bound = -1000.0 # Bidirectional, allows H+ to be consumed or produced
-ex_h.upper_bound = 1000.0
-model.add_reactions([ex_h])
+# R_ATP_Generation: 4 e_c + 4 H_c + O2_c -> ATP_c + 2 H2O_c
+atp_gen_coeffs = {
+    "e_c": -4.0, "h_c": -4.0, "o2_c": -1.0, "atp_c": 1.0, "h2o_c": 2.0
+}
 
 
-# Product Export: alkane_c15_c -> alkane_c15_e
-ex_alkane_transport = cobra.Reaction("EX_alkane_c15_e_transport")
-ex_alkane_transport.add_metabolites({alkane_c15_c: -1.0, alkane_c15_e: 1.0})
-ex_alkane_transport.lower_bound = 0.0
-ex_alkane_transport.upper_bound = 1000.0
-model.add_reactions([ex_alkane_transport])
+constraints = []
 
-# Objective: Maximize external alkane
-model.objective = ex_alkane_transport
-model.objective_direction = "maximize"
+# Metabolic Balances for all metabolites
+# Note: For metabolites involved in new reactions, their balance equations are updated.
+# New metabolites: ATP_c, ADP_c, PI_c
+
+# balance_fa_ald_c16_c
+constraints.append(glpk_interface.Constraint(
+    v_npado * npado_coeffs["fa_ald_c16_c"] + v_ex_fa_ald * 1.0,
+    lb=0, ub=0, name="balance_fa_ald_c16_c"
+))
+
+# balance_o2_c (now involved in NpADO, Exchange, and ATP_Generation)
+constraints.append(glpk_interface.Constraint(
+    v_npado * npado_coeffs["o2_c"] +
+    v_atp_generation * atp_gen_coeffs["o2_c"] +
+    v_ex_o2 * 1.0,
+    lb=0, ub=0, name="balance_o2_c"
+))
+
+# balance_nadph_c (NpADO consumes, NADPH_regen produces, no exchange)
+constraints.append(glpk_interface.Constraint(
+    v_npado * npado_coeffs["nadph_c"] +
+    v_nadph_regen * nadph_regen_coeffs["nadph_c"] +
+    v_ex_nadph * 1.0,
+    lb=0, ub=0, name="balance_nadph_c"
+))
+
+# balance_nadp_c (NpADO produces, NADPH_regen consumes, no exchange)
+constraints.append(glpk_interface.Constraint(
+    v_npado * npado_coeffs["nadp_c"] +
+    v_nadph_regen * nadph_regen_coeffs["nadp_c"] +
+    v_ex_nadp * 1.0,
+    lb=0, ub=0, name="balance_nadp_c"
+))
+
+# balance_h2o_c (NpADO produces, ATP_Maintenance consumes, ATP_Generation produces, Exchange)
+constraints.append(glpk_interface.Constraint(
+    v_npado * npado_coeffs["h2o_c"] +
+    v_atp_maintenance * atp_maint_coeffs["h2o_c"] +
+    v_atp_generation * atp_gen_coeffs["h2o_c"] +
+    v_ex_h2o * 1.0,
+    lb=0, ub=0, name="balance_h2o_c"
+))
+
+# balance_formate_c
+constraints.append(glpk_interface.Constraint(
+    v_npado * npado_coeffs["formate_c"] + v_ex_formate * 1.0,
+    lb=0, ub=0, name="balance_formate_c"
+))
+
+# balance_h_c (NpADO consumes, NADPH_regen consumes, ATP_Maintenance produces, ATP_Generation consumes, Exchange)
+constraints.append(glpk_interface.Constraint(
+    v_npado * npado_coeffs["h_c"] +
+    v_nadph_regen * nadph_regen_coeffs["h_c"] +
+    v_atp_maintenance * atp_maint_coeffs["h_c"] +
+    v_atp_generation * atp_gen_coeffs["h_c"] +
+    v_ex_h * 1.0,
+    lb=0, ub=0, name="balance_h_c"
+))
+
+# balance_e_c (NpADO consumes, ATP_Generation consumes, Exchange)
+constraints.append(glpk_interface.Constraint(
+    v_npado * npado_coeffs["e_c"] +
+    v_atp_generation * atp_gen_coeffs["e_c"] +
+    v_ex_e * 1.0,
+    lb=0, ub=0, name="balance_e_c"
+))
+
+# balance_alkane_c15_c
+constraints.append(glpk_interface.Constraint(
+    v_npado * npado_coeffs["alkane_c15_c"] + v_ex_alkane_transport * -1.0,
+    lb=0, ub=0, name="balance_alkane_c15_c"
+))
+
+# NEW: balance_atp_c (ATP_Maintenance consumes, ATP_Generation produces)
+constraints.append(glpk_interface.Constraint(
+    v_atp_maintenance * atp_maint_coeffs["atp_c"] +
+    v_atp_generation * atp_gen_coeffs["atp_c"],
+    lb=0, ub=0, name="balance_atp_c"
+))
+
+# NEW: balance_adp_c (ATP_Maintenance produces)
+constraints.append(glpk_interface.Constraint(
+    v_atp_maintenance * atp_maint_coeffs["adp_c"],
+    lb=0, ub=0, name="balance_adp_c"
+))
+
+# NEW: balance_pi_c (ATP_Maintenance produces)
+constraints.append(glpk_interface.Constraint(
+    v_atp_maintenance * atp_maint_coeffs["pi_c"],
+    lb=0, ub=0, name="balance_pi_c"
+))
+
+solver.add(constraints)
 
 
-# --- 6. Debugging: Attempting to force flux through R_NpADO directly ---
-print("\n--- Debugging: Attempting to force flux through R_NpADO directly ---")
+# --- 4. Define the Objective Function ---
+# Maximize the flux through EX_alkane_c15_e_transport
+objective_expression = v_ex_alkane_transport
+objective = glpk_interface.Objective(objective_expression, direction="max")
+solver.objective = objective
 
-# Temporarily set lower bound of R_NpADO to a positive value
-rxn_npado.lower_bound = 1.0
+# --- 5. Solve the problem ---
+status = solver.optimize()
 
-# Solve the model
-solution = model.optimize()
+print(f"\nSolution status: {status}")
+print(f"Objective Value (EX_alkane_c15_e_transport): {solver.objective.value}")
 
-print(f"Model ID: {model.id}")
-print(f"Number of reactions: {len(model.reactions)}")
-print(f"Number of metabolites: {len(model.metabolites)}")
-
-if solution.status == "optimal":
-    # More robust objective printing
-    obj_name = "Unknown Objective"
-    if isinstance(model.objective, cobra.Reaction):
-        obj_name = model.objective.id
-    elif hasattr(model.objective.expression, 'name'):
-        obj_name = model.objective.expression.name
-    elif hasattr(model.objective, 'id'):
-        obj_name = model.objective.id
-    elif hasattr(model.objective.expression, '__str__'): # Fallback for complex objectives
-        obj_name = str(model.objective.expression)
-
-    print(f"\nSolution status: {solution.status}")
-    print(f"Forced flux for {obj_name}: {solution.objective_value}")
-    print("\nKey Reaction Fluxes:")
-    print(f"{rxn_npado.id}: {solution.fluxes[rxn_npado.id]}")
-    print(f"{ex_alkane_transport.id}: {solution.fluxes[ex_alkane_transport.id]}")
-    print("\nCofactor Fluxes:")
-    print(f"{ex_o2.id}: {solution.fluxes[ex_o2.id]}")
-    print(f"{ex_nadph.id}: {solution.fluxes[ex_nadph.id]}")
-    print(f"{ex_nadp.id}: {solution.fluxes[ex_nadp.id]}")
-    print(f"{ex_formate.id}: {solution.fluxes[ex_formate.id]}")
-    print(f"{ex_h2o.id}: {solution.fluxes[ex_h2o.id]}")
-    print(f"{ex_h.id}: {solution.fluxes[ex_h.id]}")
-else:
-    print(f"\nCould NOT force flux through R_NpADO. Solution status: {solution.status}")
-    if solution.status == "infeasible":
-        print("This indicates a fundamental stoichiometric blockage within the NpADO reaction itself or its direct inputs/outputs, or an issue with cofactor balancing/exchange.")
-        print("Given that manual mass/charge balance checks pass, the issue is highly likely related to the GLPK solver setup or its interaction with cobrapy, or a very subtle issue with exchange bounds.")
+# --- 6. Print Key Reaction Fluxes ---
+print("\nKey Reaction Fluxes:")
+print(f"R_NpADO: {solver.primal_values.get('R_NpADO', 'N/A')}")
+print(f"R_NADPH_regeneration: {solver.primal_values.get('R_NADPH_regeneration', 'N/A')}")
+print(f"R_ATP_Maintenance: {solver.primal_values.get('R_ATP_Maintenance', 'N/A')}")
+print(f"R_ATP_Generation: {solver.primal_values.get('R_ATP_Generation', 'N/A')}")
+print(f"EX_alkane_c15_e_transport: {solver.primal_values.get('EX_alkane_c15_e_transport', 'N/A')}")
 
 
-# --- 7. Save the model to an SBML file ---
-# Reset lower bounds before saving
-rxn_npado.lower_bound = 0.0
-ex_alkane_transport.lower_bound = 0.0
-cobra.io.write_sbml_model(model, "minimal_npado_test_final_corrected_v8_full_rigorous_check.xml")
-print("\nModel saved to minimal_npado_test_final_corrected_v8_full_rigorous_check.xml")
+print("\nCofactor/Exchange Fluxes:")
+print(f"EX_fa_ald_c16_c: {solver.primal_values.get('EX_fa_ald_c16_c', 'N/A')}")
+print(f"EX_o2_c: {solver.primal_values.get('EX_o2_c', 'N/A')}")
+print(f"EX_nadph_c: {solver.primal_values.get('EX_nadph_c', 'N/A')}")
+print(f"EX_nadp_c: {solver.primal_values.get('EX_nadp_c', 'N/A')}")
+print(f"EX_formate_c: {solver.primal_values.get('EX_formate_c', 'N/A')}")
+print(f"EX_h2o_c: {solver.primal_values.get('EX_h2o_c', 'N/A')}")
+print(f"EX_h_c: {solver.primal_values.get('EX_h_c', 'N/A')}")
+print(f"EX_e_c: {solver.primal_values.get('EX_e_c', 'N/A')}")
+
+# --- 7. Additional Debugging Check: Force NpADO flux and see if it's possible ---
+# This part is just for diagnosis and won't affect the main optimization result.
+# solver.problem.objective.expression = v_npado
+# solver.problem.objective.direction = "max"
+# solver.variables["R_NpADO"].lb = 1.0 # Try to force at least 1 unit of NpADO flux
+# test_status = solver.optimize()
+# print(f"\n--- Debugging: Attempting to force flux through R_NpADO directly ---")
+# print(f"Test status (forcing R_NpADO=1.0): {test_status}")
+# if test_status == "optimal":
+#     print(f"R_NpADO flux when forced: {solver.primal_values.get('R_NpADO', 'N/A')}")
+#     print(f"EX_h_c flux when NpADO forced: {solver.primal_values.get('EX_h_c', 'N/A')}")
+#     print(f"EX_e_c flux when NpADO forced: {solver.primal_values.get('EX_e_c', 'N/A')}")
+#     print(f"EX_o2_c flux when NpADO forced: {solver.primal_values.get('EX_o2_c', 'N/A')}")
+# else:
+#     print(f"Could NOT force flux through R_NpADO. This indicates a fundamental stoichiometric or cofactor balancing issue.")
+# # Reset NpADO lower bound for the main objective if you were to run the original objective again
+# solver.variables["R_NpADO"].lb = 0.0
+# solver.problem.objective.expression = objective_expression
+# solver.problem.objective.direction = "max"
